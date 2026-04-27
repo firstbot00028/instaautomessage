@@ -20,7 +20,7 @@ def run_flask():
 # 2. Instagram Credentials (Direct Strings)
 # ഇവിടെ os.getenv ഉപയോഗിക്കുന്നില്ല, അതുകൊണ്ട് എറർ വരില്ല!
 USERNAME = 'x_hunder_y'
-PASSWORD = 'Adamee@1234'
+PASSWORD = 'Adamee@12345'
 
 cl = Client()
 
