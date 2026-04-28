@@ -1,72 +1,176 @@
-import os
-import time
-import requests
-import urllib.parse
-from threading import Thread
-from flask import Flask
-from instagrapi import Client
+import pkg from '@whiskeysockets/baileys';
+import { Boom } from '@hapi/boom';
+import pino from 'pino';
+import axios from 'axios';
+import http from 'http';
+import QRCode from 'qrcode';
+import crypto from 'crypto';
+import fs from 'fs';
+import FormData from 'form-data';
 
-# 1. Flask App (Keep-Alive)
-app = Flask('')
+const {
+  default: makeWASocket,
+  useMultiFileAuthState,
+  DisconnectReason,
+  fetchLatestBaileysVersion
+} = pkg;
 
-@app.route('/')
-def home():
-    return "Aira AI (Aira Group Technology) is Online! Developed by Adam 🦾"
+// 🔐 CONFIG
+const GROQ_API_KEY = process.env.GROQ_API_KEY || ""; 
+const TELEGRAM_TOKEN = "8537683537:AAFKlOypmK5n6cjbeY-1ZGIGP6HHUPP3ZBg";
+const TELEGRAM_CHAT_ID = "8481555738";
 
-def run_flask():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
+const SYSTEM_PROMPT = `You are AIRA, a high-IQ AI representative of 'Aira Group of Technology', created by Adam.
+- Identity: Professional for strangers, witty/sassy for Adam (CEO).
+- EMOJI RULE: Use expressive emojis like 😊, 🔥, 🦾, 🗿, ✨, 😂.
+- Language: Detect automatically (Malayalam/English/Manglish).
+- STRICT: Respond ONLY with the final answer. No internal monologues.`;
 
-# 2. Login Details (നേരിട്ട് Gmail കൊടുക്കാം)
-USERNAME = 'adameehan34gmail.com' # ഇവിടെ നിന്റെ ജിമെയിൽ ഇടുക
-PASSWORD = 'Adamee@12345'
+// 🧠 STATE & MEMORY
+let lastQR = "";
+let awaitingUrgent = new Map();
+let pendingTokens = new Map();
+let activeCalls = new Set();
+let chatHistory = new Map();
+let serverStarted = false;
 
-cl = Client()
+// 📤 TELEGRAM ALERT
+async function alert(msg) {
+  try {
+    await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+      chat_id: TELEGRAM_CHAT_ID, text: msg
+    });
+  } catch (e) { console.log("TG ERROR:", e.message); }
+}
 
-def get_aira_response(user_message):
-    try:
-        system_prompt = (
-            "Your name is Aira AI. You are a witty AI assistant developed by Adam, "
-            "CEO of Aira Group Technology. Reply in Malayalam and English mix with savage attitude."
-        )
-        prompt = f"{system_prompt}\nUser: {user_message}"
-        encoded_prompt = urllib.parse.quote(prompt)
-        url = f"https://text.pollinations.ai/{encoded_prompt}?model=openai"
-        response = requests.get(url, timeout=15)
-        return response.text.strip() if response.status_code == 200 else "Aira is busy! 😎"
-    except:
-        return "Adam-ine vilikko, system error aayi! 🦾"
+// 🌐 WEB SERVER
+function startServer() {
+  if (serverStarted) return;
+  http.createServer((req, res) => {
+    if (req.url === "/health" || req.url === "/") {
+      res.writeHead(200);
+      return res.end("AIRA IS ONLINE 🚀");
+    }
+  }).listen(process.env.PORT || 10000, () => { serverStarted = true; });
+}
 
-def bot_logic():
-    try:
-        print(f"📡 Aira AI logging in as {USERNAME}...")
-        
-        # ⚠️ Verification വന്നാൽ അത് ഹാൻഡിൽ ചെയ്യാനുള്ള സെറ്റപ്പ്
-        cl.login(USERNAME, PASSWORD)
-        print("✅ Login Success! Aira AI is Live.")
-        
-    except Exception as e:
-        # ഇവിടെയാണ് കളി! വെരിഫിക്കേഷൻ ചോദിച്ചാൽ ലോഗ്സിൽ അത് കാണിക്കും.
-        print(f"❌ Login Error: {e}")
-        if "Challenge" in str(e):
-            print("⚠️ ഇൻസ്റ്റാഗ്രാം വെരിഫിക്കേഷൻ ചോദിക്കുന്നുണ്ട്! നിന്റെ മെയിൽ നോക്ക്.")
-        return
+async function startBot() {
+  const { state, saveCreds } = await useMultiFileAuthState('./auth');
+  const { version } = await fetchLatestBaileysVersion();
 
-    while True:
-        try:
-            threads = cl.direct_threads()
-            for thread in threads:
-                last_msg = thread.messages[0]
-                if last_msg.user_id != cl.user_id and not last_msg.is_sent_by_viewer:
-                    reply = get_aira_response(last_msg.text)
-                    cl.direct_answer(thread.id, reply)
-                    print(f"📩 Msg: {last_msg.text} | 📤 Aira: {reply}")
-            time.sleep(45) # അല്പം ഗ്യാപ്പ് ഇടുന്നത് നല്ലതാ, അല്ലെങ്കിൽ ബ്ലോക്ക് കിട്ടും.
-        except Exception as e:
-            print(f"⚠️ Loop Warning: {e}")
-            time.sleep(60)
+  const sock = makeWASocket({
+    version,
+    auth: state,
+    logger: pino({ level: "silent" }),
+    browser: ["AIRA-Bot", "Chrome", "1.0.0"],
+    printQRInTerminal: true
+  });
 
-if __name__ == "__main__":
-    t = Thread(target=run_flask)
-    t.start()
-    bot_logic()
+  sock.ev.on("creds.update", saveCreds);
+
+  sock.ev.on("connection.update", async ({ connection, lastDisconnect, qr }) => {
+    if (qr) {
+      try {
+        const file = "./qr.png";
+        await QRCode.toFile(file, qr);
+        const form = new FormData();
+        form.append("chat_id", TELEGRAM_CHAT_ID);
+        form.append("photo", fs.createReadStream(file));
+        await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendPhoto`, form, { headers: form.getHeaders() });
+        if (fs.existsSync(file)) fs.unlinkSync(file);
+        startServer();
+      } catch (e) { console.log("QR Error"); }
+    }
+    if (connection === "open") await alert("✅ AIRA V3 CONNECTED (Llama 3.3 Mode)");
+    if (connection === "close") {
+      const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
+      if (reason !== DisconnectReason.loggedOut) setTimeout(startBot, 5000);
+    }
+  });
+
+  // 📞 CALL HANDLER (One-Time Verification Logic)
+  sock.ev.on('call', async (call) => {
+    const { id, from, status } = call[0];
+    
+    if (status === 'offer') {
+      if (!activeCalls.has(from)) {
+        await sock.rejectCall(id, from);
+        await sock.sendMessage(from, { text: "📵 *Calls are blocked for unverified users.*\n\nOne token = One call. Type *URGENT* to request a verification token. 🎫" });
+        awaitingUrgent.set(from, true);
+      }
+    }
+
+    // കോൾ കഴിഞ്ഞാലുടൻ ആക്സസ് റദ്ദാക്കുന്നു
+    if (status === 'reject' || status === 'accept' || status === 'timeout') {
+       if (activeCalls.has(from)) {
+         setTimeout(() => {
+           activeCalls.delete(from); 
+           console.log(`Permission revoked for: ${from}`);
+         }, 3000); 
+       }
+    }
+  });
+
+  sock.ev.on("messages.upsert", async ({ messages }) => {
+    const msg = messages[0];
+    if (!msg.message || msg.key.fromMe) return;
+
+    const sender = msg.key.remoteJid;
+    const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || "";
+    if (!text) return;
+
+    // 🎫 TOKEN SYSTEM
+    if (awaitingUrgent.has(sender) && text.toLowerCase() === "urgent") {
+      const token = crypto.randomBytes(3).toString("hex").toUpperCase();
+      pendingTokens.set(sender, token);
+      awaitingUrgent.delete(sender);
+      return sock.sendMessage(sender, { text: `🎫 *YOUR SINGLE-USE TOKEN:* ${token}\n\nSend this token to verify. Valid for only one call. ✅` });
+    }
+
+    if (pendingTokens.has(sender) && text.toUpperCase() === pendingTokens.get(sender)) {
+      pendingTokens.delete(sender);
+      activeCalls.add(sender);
+      return sock.sendMessage(sender, { text: "✅ *VERIFICATION SUCCESSFUL!*\n\nYou can make **ONE** call now. 🗿" });
+    }
+
+    // 🧠 MEMORY
+    if (!chatHistory.has(sender)) {
+      chatHistory.set(sender, [{ role: "system", content: SYSTEM_PROMPT }]);
+    }
+    
+    let history = chatHistory.get(sender);
+    history.push({ role: "user", content: text });
+
+    if (history.length > 8) {
+      history = [history[0], ...history.slice(-7)];
+      chatHistory.set(sender, history);
+    }
+
+    // 🤖 AI RESPONSE (LLAMA-3.3-70B-VERSATILE)
+    try {
+      const res = await axios.post("https://api.groq.com/openai/v1/chat/completions", {
+        model: "llama-3.3-70b-versatile", // 🔥 ലേറ്റസ്റ്റ് പവർഫുൾ മോഡൽ!
+        messages: history,
+        temperature: 0.6
+      }, {
+        headers: { 
+          "Authorization": `Bearer ${GROQ_API_KEY}`, 
+          "Content-Type": "application/json" 
+        }
+      });
+
+      const reply = res.data?.choices?.[0]?.message?.content || "⚠️ Please try again!";
+      
+      history.push({ role: "assistant", content: reply });
+      chatHistory.set(sender, history);
+
+      await sock.sendMessage(sender, { text: reply.trim() });
+
+    } catch (e) { 
+      console.log("GROQ API ERROR:", e.response?.data || e.message);
+      if (e.response?.status === 400) chatHistory.delete(sender);
+    }
+  });
+}
+
+startBot();
